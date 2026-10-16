@@ -2,8 +2,7 @@
 
 **Fecha de revisión:** 16 de octubre de 2026  
 **Revisión técnica:** José Alfredo Sánchez  
-**Código:** [`simulation_corregida.py`](simulation_corregida.py)  
-**Base examinada:** `simulation.py` entregado, manuscrito *Theoretical Framework for Sensorless pH Monitoring in Hydrometallurgical Systems: A Voltammetric Overpotential Approach for Edge Computing* y artículo de *Nature Communications* [Kobayashi et al. (2026)](https://doi.org/10.1038/s41467-026-77463-7).
+**Código:** [`simulation.py`]
 
 > **Conclusión central:** sí se pueden construir **sensores virtuales de pH**, y sí hay **datos públicos descargables**. Sin embargo, las bases encontradas no proporcionan, de forma verificada, el conjunto completo y específico **LSV de evolución de hidrógeno (HER) + pH de referencia + múltiples matrices hidrometalúrgicas + temperatura y electrodo** necesario para validar directamente todo Hydro-Logics. Hay que combinar estudios de factibilidad con un conjunto local de calibración y de prueba. Este software **no convierte** datos sintéticos en evidencia experimental.
 
