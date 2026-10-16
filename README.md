@@ -29,17 +29,17 @@ source .venv/bin/activate
 # Windows PowerShell: .venv\Scripts\Activate.ps1
 python -m pip install numpy scipy matplotlib
 
-python simulation_corregida.py --self-test
-python simulation_corregida.py --mode synthetic --output-dir resultados_sinteticos
+python simulation.py --self-test
+python simulation.py --mode synthetic --output-dir resultados_sinteticos
 ```
 
 Para una prueba rápida sin figuras:
 
 ```bash
-python simulation_corregida.py --mode synthetic --trials 10 --replicates 5 --no-plots
+python simulation.py --mode synthetic --trials 10 --replicates 5 --no-plots
 ```
 
-Para consultar todas las opciones: `python simulation_corregida.py --help`.
+Para consultar todas las opciones: `python simulation.py --help`.
 
 **Salida por defecto:** carpeta `hydrologics_output/`, con `predicciones.csv`, `resultados.json` y hasta cuatro figuras `.png`. El nombre/carpeta puede modificarse con `--output-dir`. Usar `--seed` fija la semilla del generador NumPy, pero el resultado obtenido **no debe forzarse** a coincidir con las métricas del artículo original, ya que el diseño estadístico cambió.
 
