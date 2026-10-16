@@ -101,7 +101,7 @@ Las colas de error **no son gaussianas**; el filtro de Kalman estándar es el pu
 ## 5. Ejecutar la simulación sintética
 
 ```bash
-python simulation_corregida.py --mode synthetic \
+python simulation.py --mode synthetic \
   --seed 42 --trials 50 --replicates 5 \
   --temperature-C 25 \
   --interference-probability 0.05 \
@@ -128,14 +128,14 @@ Opciones útiles para escenarios alternativos:
 
 ```bash
 # Quitar interferencias
-python simulation_corregida.py --interference-probability 0
+python simulation.py --interference-probability 0
 
 # Ajustar niveles de ruido a un experimento real (en mV)
-python simulation_corregida.py --sigma-ref-mV 10 \
+python simulation.py --sigma-ref-mV 10 \
   --sigma-ohmic-mV 6 --sigma-measurement-mV 1
 
 # Q de proceso mayor que cero para permitir movimiento del pH
-python simulation_corregida.py --process-variance-ph2 0.0001
+python simulation.py --process-variance-ph2 0.0001
 ```
 
 No se introdujo una opción de `Ru` en ohmios porque el generador no simula corriente: asignar `15 Ω` sin corriente `i` no basta para construir el término `iRu`.
@@ -160,7 +160,7 @@ prueba01,test,6.30,-0.691,25,batch_A
 **Estos números son solo ilustrativos, no datos observados.** Debe haber **al menos 3 pH de buffer distintos** de calibración; se recomiendan los cinco estándares, con **tres réplicas por buffer**, preferentemente iguales al medio de la muestra. Las muestras con `role=test` **nunca se utilizan** para estimar `Kcal`. Cuando no se disponga de `pH_reference` en las filas test, deje el campo vacío; el código predice, pero **no puede reportar RMSE, R² o cobertura**.
 
 ```bash
-python simulation_corregida.py --mode real \
+python simulation.py --mode real \
   --input onsets_reales.csv --output-dir resultados_reales
 ```
 
@@ -183,13 +183,13 @@ s002,prueba01,test,6.30,0.000,-0.000001,25,batch_A
 **No es un archivo completo**: cada curva requiere decenas/cientos de puntos ordenados en **voltaje estrictamente decreciente**, con **al menos 15 puntos iniciales** de corriente de fondo y suficientes puntos posteriores.
 
 ```bash
-python simulation_corregida.py --mode extract \
+python simulation.py --mode extract \
   --input barridos_LSV.csv \
   --baseline-points 15 --threshold-sigma 3 \
   --consecutive 3 --current-sign negative \
   --output-dir salidas_lsv
 
-python simulation_corregida.py --mode real \
+python simulation.py --mode real \
   --input salidas_lsv/onsets_extraidos.csv \
   --output-dir resultados_lsv_reales
 ```
