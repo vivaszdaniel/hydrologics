@@ -1,420 +1,494 @@
-"""
-=============================================================================
-HYDROLOGICS PROTOCOL: Sensorless pH Monitoring via Voltammetric Onset
-=============================================================================
-Implementation of the HydroLogics protocol for indirect pH estimation
-via Hydrogen Evolution Reaction (HER) with zero-mean ohmic fluctuations.
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Hydro-Logics: reproducible onset-pH estimator and synthetic/CSV evaluation.
 
-Reference:
-  Vivas, D., Sanchez, J., Brito, Y., Duque, J., & Armando, A. (2026).
-  "Theoretical Framework for Sensorless pH Monitoring in Hydrometallurgical
-  Systems: A Voltammetric Overpotential Approach for Edge Computing."
-
-Authors: D.V. & J.S.
-Date: 2026-10-12
-License: Open Source / GNU GPL v3.0
-=============================================================================
+Derived from the simulation supplied by the research team (D.V. and J.S.;
+original header declares GNU GPL v3). Technical review for Jose Alfredo Sanchez,
+2026-10-16. Distributed as a derivative under GNU GPL v3. This is NOT experimental validation or a HER
+curve-level electrochemical simulator. Use --help for command-line arguments.
 """
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import math
+from collections import defaultdict
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
 import numpy as np
 from scipy.stats import kurtosis
-import matplotlib.pyplot as plt
-import json
 
-# ============================================================================
-# GLOBAL CONFIGURATION
-# ============================================================================
-np.random.seed(42)
-
-# Physical constants
-R_GAS = 8.314462618      # J/(mol·K)
-F_CONST = 96485.33212    # C/mol
-T_KELVIN = 298.15        # K (25°C)
-
-# HydroLogics protocol parameters (Section 6 of paper)
-PARAMS = {
-    'Ru': 15.0,                       # Ω (uncompensated resistance)
-    'sigma_noise': 0.1e-3,            # A (measurement noise)
-    'delta_E_ref_std': 15e-3,         # V (pseudo-reference drift standard deviation)
-    'K_cal_true': -0.3200,            # V (true physical reference value)
-    'V_max': -1.5,                    # V (sweep limit, hydrometallurgy mode)
-    'interference_prob': 0.05,        # Redox interference probability (5%)
-    'interference_magnitude': 0.030,  # V (interference magnitude)
-}
-
-# pH levels and simulation settings
-pH_levels = np.linspace(2.0, 12.0, 21)
-N_ITERATIONS = 50
-S_NERNST = (2.303 * R_GAS * T_KELVIN) / F_CONST  # ~0.05916 V/pH
+R_GAS = 8.31446261815324
+F_CONST = 96485.33212
+BUFFERS = (2.0, 4.0, 7.0, 10.0, 12.0)
 
 
-# ============================================================================
-# PHYSICAL MODEL: Vonset Generator (Zero-Mean Ohmic Fluctuation)
-# ============================================================================
-def generate_Vonset(pH_true, K_cal, noise=True, include_interference=True):
+def slope(T_c: float) -> float:
+    """Absolute value of the ideal Nernst slope [V / pH] at T [deg C]."""
+    T = float(T_c) + 273.15
+    if not 250 < T < 450:
+        raise ValueError(f"Temperatura no admisible: {T_c} °C")
+    return math.log(10.0) * R_GAS * T / F_CONST
+
+
+@dataclass
+class Config:
+    k_true_V: float = -0.3200
+    temperature_C: float = 25.0
+    sigma_ref_V: float = 0.015
+    sigma_ohmic_residual_V: float = 0.015
+    sigma_measurement_V: float = 0.002
+    interference_probability: float = 0.05
+    interference_min_V: float = 0.020
+    interference_max_V: float = 0.030
+    q_ph2: float = 0.0
+    prior_pH: float = 7.0
+    prior_variance_ph2: float = 1e6
+
+    def gaussian_variance_V2(self) -> float:
+        return (self.sigma_ref_V**2 + self.sigma_ohmic_residual_V**2
+                + self.sigma_measurement_V**2)
+
+    def interference_variance_V2(self) -> float:
+        a, b = self.interference_min_V, self.interference_max_V
+        return self.interference_probability * (a * a + a * b + b * b) / 3
+
+    def check(self) -> None:
+        slope(self.temperature_C)
+        for name in ('sigma_ref_V', 'sigma_ohmic_residual_V', 'sigma_measurement_V',
+                     'interference_min_V', 'interference_max_V', 'q_ph2'):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} debe ser >= 0")
+        if not 0 <= self.interference_probability <= 1:
+            raise ValueError('interference_probability fuera de [0,1]')
+        if self.interference_max_V < self.interference_min_V:
+            raise ValueError('interference_max_V debe ser >= interference_min_V')
+        if self.prior_variance_ph2 <= 0:
+            raise ValueError('prior_variance_ph2 debe ser > 0')
+
+
+def generate_onset(ph: float, cfg: Config, rng: np.random.Generator,
+                   interference: bool = True, temperature_C: float | None = None) -> float:
+    """Synthetic onset [V]. Perturbations are independent PER READING.
+
+    Important: zero-mean residual iR is NOT a physical uncompensated i*Ru drop.
+    For actual samples model current, Ru, surface kinetics and temporal drift.
     """
-    Generates the onset potential (Vonset) for a given pH, incorporating 
-    reference drift, zero-mean ohmic fluctuations, measurement noise, and interferences.
-    """
-    # Deterministic term (calibrated empirical model)
-    Vonset_theoretical = K_cal + (-S_NERNST * pH_true)
-    
-    # Source 1: Pseudo-reference drift
-    delta_E_ref = np.random.normal(0, PARAMS['delta_E_ref_std'])
-    
-    # Source 2: Ohmic drop fluctuation model (Strictly zero-mean to avoid calibration shift)
-    iRu_drop = np.random.normal(0, 0.015)  # V (fluctuación simétrica de media cero)
-    
-    # Source 3: Gaussian measurement noise
-    measurement_noise = np.random.normal(0, 2e-3) if noise else 0.0
-    
-    # Source 4: Redox interferences (heavy tails)
-    interference = 0.0
-    if include_interference and np.random.rand() < PARAMS['interference_prob']:
-        sign = np.random.choice([-1, 1])
-        magnitude = np.random.uniform(0.020, PARAMS['interference_magnitude'])
-        interference = sign * magnitude
-    
-    return Vonset_theoretical + delta_E_ref - iRu_drop + measurement_noise + interference
+    temp = cfg.temperature_C if temperature_C is None else temperature_C
+    v = cfg.k_true_V - slope(temp) * ph
+    v += rng.normal(0, cfg.sigma_ref_V)
+    v += rng.normal(0, cfg.sigma_ohmic_residual_V)
+    v += rng.normal(0, cfg.sigma_measurement_V)
+    if interference and rng.random() < cfg.interference_probability:
+        v += rng.choice((-1.0, 1.0)) * rng.uniform(
+            cfg.interference_min_V, cfg.interference_max_V)
+    return float(v)
 
 
-# ============================================================================
-# K_cal CALIBRATION
-# ============================================================================
-def calibrate_system(buffer_pH_list, n_replicates=3):
+def estimate_calibration(rows: list[dict]) -> tuple[float, float, dict]:
+    """Fit fixed physical slope and estimate intercept across independent buffers.
+
+    Each buffer is first averaged (avoids overweighting many replicates).
+    uK is the across-buffer standard error of the fitted intercept, NOT k=2.
     """
-    Calibration of empirical parameter K_cal using 5 standard buffers
-    (pH 2.0, 4.0, 7.0, 10.0, 12.0) with 3 replicates each.
-    """
-    V_onset_means = []
-    
-    for pH_buffer in buffer_pH_list:
-        V_onset_replicates = [
-            generate_Vonset(pH_buffer, PARAMS['K_cal_true'], 
-                          noise=True, include_interference=False)
-            for _ in range(n_replicates)
-        ]
-        V_onset_means.append(np.mean(V_onset_replicates))
-    
-    # Linear regression: K_cal = Vonset + S_NERNST * pH
-    K_cal_values = [V + S_NERNST * pH for V, pH in zip(V_onset_means, buffer_pH_list)]
-    K_cal_estimated = np.mean(K_cal_values)
-    u_K = np.std(K_cal_values, ddof=1) / np.sqrt(len(K_cal_values))
-    
-    return K_cal_estimated, u_K
+    buffers: dict[float, list[float]] = defaultdict(list)
+    for r in rows:
+        ph = float(r['pH_reference'])
+        t = float(r['temperature_C'])
+        v = float(r['Vonset_V'])
+        if not all(map(math.isfinite, (ph, t, v))):
+            raise ValueError('Dato no finito en calibración')
+        buffers[round(ph, 6)].append(v + slope(t) * ph)
+    if len(buffers) < 3:
+        raise ValueError('Se requieren >=3 pH de buffer diferentes para calibrar')
+    means = np.array([np.mean(values) for values in buffers.values()])
+    k_est = float(np.mean(means))
+    u_k = float(np.std(means, ddof=1) / math.sqrt(len(means)))
+    summary = {'n_buffers': len(buffers), 'n_readings': len(rows),
+               'buffers_pH': sorted(buffers), 'method': 'fixed-Nernst-slope; equal-buffer weight'}
+    return k_est, u_k, summary
 
 
-# ============================================================================
-# 1-STATE KALMAN FILTER
-# ============================================================================
-class HydroLogicsFilter:
+class PHKalman:
+    """Scalar Kalman observer: y = K_cal - S(T) * pH + epsilon.
+
+    Measurement variance is expressed in V^2; calibration uncertainty is a
+    shared systematic term, propagated separately once after the final update.
+    A single-state filter does not track correlated reference-electrode drift.
     """
-    1-state Kalman filter for pH estimation.
-    """
-    
-    def __init__(self, K_cal, u_K):
-        self.K_cal = K_cal
-        
-        # Measurement variance in Vonset units (V²)
-        self.R_vonset = (u_K)**2 + (0.015)**2 + (0.010)**2
-        
-        # Initial pH variance
-        self.P = 1.0
-        
-        # Process noise
-        self.Q = 1e-4
-        
-        # Initial estimate
-        self.pH_est = 7.0
-        
-        # Observation model: H = -S_NERNST
-        self.H = -S_NERNST
-    
-    def update(self, Vonset_measured):
-        """
-        Kalman filter update step.
-        """
-        # 1. Prediction
-        pH_pred = self.pH_est
-        P_pred = self.P + self.Q
-        
-        # 2. Innovation: Vonset_measured - Vonset_expected
-        Vonset_expected = self.K_cal + self.H * pH_pred
-        innovation = float(Vonset_measured - Vonset_expected)
-        
-        # 3. Kalman Gain
-        S_innov = (self.H**2) * P_pred + self.R_vonset
-        K_gain = self.H * P_pred / S_innov
-        
-        # 4. Update
-        self.pH_est = pH_pred + K_gain * innovation
-        self.P = (1 - K_gain * self.H) * P_pred
-        
-        return self.pH_est, self.P
+    def __init__(self, k_cal_V: float, config: Config):
+        self.k_cal = float(k_cal_V)
+        self.cfg = config
+        self.x = float(config.prior_pH)
+        self.p = float(config.prior_variance_ph2)
+        self.r = config.gaussian_variance_V2() + config.interference_variance_V2()
+        if self.r <= 0:
+            self.r = 1e-16  # numeric floor for zero-noise self-test
+
+    def update(self, onset_V: float, temperature_C: float) -> tuple[float, float]:
+        p_pred = self.p + self.cfg.q_ph2
+        h = -slope(temperature_C)  # CRITICAL: negative observation derivative
+        innovation = float(onset_V) - (self.k_cal + h * self.x)
+        innov_var = h * h * p_pred + self.r
+        gain = p_pred * h / innov_var  # negative for positive Nernst slope
+        self.x += gain * innovation
+        # Joseph form: numerically nonnegative covariance
+        self.p = (1 - gain * h)**2 * p_pred + gain**2 * self.r
+        return float(self.x), float(self.p)
 
 
-# ============================================================================
-# MONTE CARLO SIMULATION
-# ============================================================================
-def run_monte_carlo(K_cal_estimated, u_K):
-    """
-    Runs the complete Monte Carlo simulation.
-    """
-    print("\n" + "="*70)
-    print("MONTE CARLO SIMULATION")
-    print("="*70)
-    print(f"pH levels: {len(pH_levels)}")
-    print(f"Iterations per level: {N_ITERATIONS}")
-    print(f"Total evaluations: {len(pH_levels) * N_ITERATIONS}")
-    print(f"Include redox interferences: {PARAMS['interference_prob']*100:.0f}%")
-    
+def assess_readings(observations: list[dict], k_cal: float, u_k: float,
+                    cfg: Config) -> dict:
+    if not observations:
+        raise ValueError('No hay mediciones para el filtro')
+    f = PHKalman(k_cal, cfg)
+    for obs in observations:
+        f.update(float(obs['Vonset_V']), float(obs['temperature_C']))
+    # Single shared calibration offset appears ONCE, not once per reading.
+    # Approx. valid for equal temperatures, same K_cal used throughout.
+    t_values = [float(o['temperature_C']) for o in observations]
+    s_effective = float(np.mean([slope(t) for t in t_values]))
+    u_filter = math.sqrt(max(0.0, f.p))
+    u_total = math.sqrt(f.p + (u_k / s_effective)**2)
+    return {'pH_est': f.x, 'u_filter_pH': u_filter,
+            'u_calibration_pH': abs(u_k / s_effective),
+            'u_combined_pH': u_total, 'U95_approx_pH': 2 * u_total,
+            'n_readings': len(observations)}
+
+
+def synthetic_calibration(cfg: Config, rng: np.random.Generator) -> list[dict]:
+    return [dict(pH_reference=ph, temperature_C=cfg.temperature_C,
+                 Vonset_V=generate_onset(ph, cfg, rng, interference=False))
+            for ph in BUFFERS for _ in range(3)]
+
+
+def run_synthetic(cfg: Config, rng: np.random.Generator, trials: int,
+                  replicates: int) -> tuple[list[dict], dict, dict]:
+    if trials < 2 or replicates < 1:
+        raise ValueError('trials >= 2 y replicates >= 1')
+    # Calibration and evaluations draw independent onset measurements.
+    cal_rows = synthetic_calibration(cfg, rng)
+    k_est, u_k, cal_info = estimate_calibration(cal_rows)
+    levels = np.linspace(2.0, 12.0, 21)
+    records = []
+    for ph in levels:
+        for trial in range(trials):
+            obs = [dict(Vonset_V=generate_onset(float(ph), cfg, rng),
+                        temperature_C=cfg.temperature_C) for _ in range(replicates)]
+            result = assess_readings(obs, k_est, u_k, cfg)
+            result.update(sample_id=f'sim_ph{ph:.1f}_trial{trial:03d}',
+                          pH_reference=float(ph), role='synthetic',
+                          temperature_C=cfg.temperature_C)
+            records.append(result)
+    cal_info.update(K_cal_estimated_V=k_est, u_K_standard_V=u_k,
+                    K_cal_true_V=cfg.k_true_V,
+                    K_offset_V=k_est - cfg.k_true_V)
+    return records, cal_info, dict(mode='synthetic', n_levels=len(levels),
+                                   n_trials_per_level=trials,
+                                   readings_per_trial=replicates,
+                                   n_simulated_test_readings=len(records) * replicates)
+
+
+def load_onset_csv(input_path: Path) -> list[dict]:
+    with input_path.open(encoding='utf-8-sig', newline='') as f:
+        reader = csv.DictReader(f)
+        needed = {'sample_id', 'role', 'Vonset_V', 'temperature_C'}
+        if not needed.issubset(set(reader.fieldnames or [])):
+            raise ValueError(f'Faltan columnas: {sorted(needed - set(reader.fieldnames or []))}')
+        result = []
+        for n, row in enumerate(reader, 2):
+            role = str(row['role']).strip().lower()
+            if role not in ('calibration', 'test'):
+                raise ValueError(f'Fila {n}: role debe ser calibration o test')
+            if not row['sample_id'].strip():
+                raise ValueError(f'Fila {n}: sample_id vacío')
+            for col in ('Vonset_V', 'temperature_C'):
+                val = float(row[col]);
+                if not math.isfinite(val):
+                    raise ValueError(f'Fila {n}: valor no finito {col}')
+            row['role'] = role
+            row['Vonset_V'] = float(row['Vonset_V'])
+            row['temperature_C'] = float(row['temperature_C'])
+            txt = (row.get('pH_reference') or '').strip()
+            row['pH_reference'] = float(txt) if txt else None
+            result.append(row)
+    if not result:
+        raise ValueError('CSV vacío')
+    return result
+
+
+def run_real(cfg: Config, rows: list[dict]) -> tuple[list[dict], dict, dict]:
+    calibration = [r for r in rows if r['role'] == 'calibration']
+    test = [r for r in rows if r['role'] == 'test']
+    if not calibration or not test:
+        raise ValueError('Se requieren filas separadas con role=calibration y role=test')
+    if any(r['pH_reference'] is None for r in calibration):
+        raise ValueError('Cada fila calibration requiere pH_reference medido')
+    cal_ids = {r['sample_id'] for r in calibration}
+    test_ids = {r['sample_id'] for r in test}
+    if cal_ids.intersection(test_ids):
+        raise ValueError('Fuga de datos: sample_id simultáneamente en calibration y test')
+    batch_ids = {str(r.get('batch_id') or '').strip() for r in rows}
+    if len(batch_ids) > 1:
+        raise ValueError('Distintos batch_id: analice cada electrodo/matriz por separado')
+    k_est, u_k, cal_info = estimate_calibration(calibration)
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for row in test:
+        grouped[row['sample_id']].append(row)
+    records = []
+    for ident, obs in grouped.items():
+        labels = [o['pH_reference'] for o in obs if o['pH_reference'] is not None]
+        if labels and (len(labels) != len(obs) or max(labels) - min(labels) > 0.03):
+            raise ValueError(f'{ident}: etiqueta de pH incoherente dentro de un mismo sample_id')
+        point = assess_readings(obs, k_est, u_k, cfg)
+        point.update(sample_id=ident, role='test',
+                     pH_reference=float(np.mean(labels)) if labels else None,
+                     temperature_C=float(np.mean([o['temperature_C'] for o in obs])))
+        records.append(point)
+    cal_info.update(K_cal_estimated_V=k_est, u_K_standard_V=u_k,
+                    warning='uK y ruido de referencia no validados metrológicamente')
+    return records, cal_info, dict(mode='real', n_test_groups=len(records),
+                                   n_test_readings=len(test), n_calibration_rows=len(calibration),
+                                   batch_id=next(iter(batch_ids)))
+
+
+def metrics_for(records: list[dict]) -> dict:
+    labelled = [r for r in records if r.get('pH_reference') is not None]
+    if not labelled:
+        return {'n_total': len(records), 'n_labelled': 0,
+                'note': 'Sin pH de referencia en test: no calculable RMSE/R2/cobertura'}
+    true = np.array([r['pH_reference'] for r in labelled], dtype=float)
+    pred = np.array([r['pH_est'] for r in labelled], dtype=float)
+    u = np.array([r['U95_approx_pH'] for r in labelled], dtype=float)
+    errors = pred - true
+    rmse = float(np.sqrt(np.mean(errors**2)))
+    var = float(np.sum((true - true.mean())**2))
+    out = {'n_total': len(records), 'n_labelled': len(labelled),
+           'RMSE_pH': rmse, 'MAE_pH': float(np.mean(np.abs(errors))),
+           'bias_pH': float(np.mean(errors)),
+           'median_U95_approx_pH': float(np.median(u)),
+           'empirical_coverage_pct': float(100 * np.mean(np.abs(errors) <= u)),
+           'excess_kurtosis': float(kurtosis(errors, fisher=True, bias=False))
+           if len(errors) >= 4 and np.std(errors) > 0 else None,
+           'uncertainty_note': '±2u aproximado, NO IC 95% garantizado bajo colas pesadas'}
+    out['R2'] = float(1 - np.sum(errors**2)/var) if var > 0 else None
+    out['NSE'] = out['R2']  # identical formula, not an independent validation
+    return out
+
+
+def write_csv(path: Path, records: list[dict]) -> None:
+    if not records:
+        return
+    columns = list(records[0])
+    with path.open('w', newline='', encoding='utf-8') as f:
+        w = csv.DictWriter(f, fieldnames=columns, extrasaction='ignore')
+        w.writeheader(); w.writerows(records)
+
+
+def plot_results(records: list[dict], metrics: dict, out_dir: Path) -> None:
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    labelled = [r for r in records if r.get('pH_reference') is not None]
+    if not labelled:
+        return
+    target = np.array([r['pH_reference'] for r in labelled])
+    pred = np.array([r['pH_est'] for r in labelled])
+    err = pred - target
+    u = np.array([r['U95_approx_pH'] for r in labelled])
+    levels = sorted(set(target))
+    xs = np.array(levels)
+    avg = np.array([np.mean(pred[target == p]) for p in xs])
+    spread = np.array([np.std(pred[target == p], ddof=1) if sum(target == p)>1 else 0
+                       for p in xs])
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot([min(target), max(target)], [min(target), max(target)], 'k--', label='Ideal')
+    ax.errorbar(xs, avg, yerr=spread, fmt='o', capsize=2, label='Media ± desviación')
+    ax.set(xlabel='pH referencia', ylabel='pH estimado', title='Evaluación fuera de calibración')
+    ax.legend(); ax.grid(alpha=.25); fig.tight_layout()
+    fig.savefig(out_dir/'fig1_pH_referencia_vs_estimado.png', dpi=180); plt.close(fig)
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.hist(err, bins=min(40, max(8, int(np.sqrt(len(err))))), edgecolor='black', alpha=.8)
+    ax.axvline(0, linestyle='--', color='black')
+    ax.set(xlabel='Error (pH)', ylabel='Frecuencia', title='Distribución de error')
+    fig.tight_layout(); fig.savefig(out_dir/'fig2_errores.png', dpi=180); plt.close(fig)
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.scatter(target, abs(err), s=14, label='|error|')
+    ax.scatter(target, u, s=10, alpha=.4, label='U ≈ 2u')
+    ax.set(xlabel='pH referencia', ylabel='Unidades pH', title='Errores absolutos y amplitud del intervalo')
+    ax.legend(); fig.tight_layout(); fig.savefig(out_dir/'fig3_error_e_intervalos.png', dpi=180); plt.close(fig)
+    fig, ax = plt.subplots(figsize=(7, 4)); ax.axis('off')
+    fmt = lambda key: f'{metrics[key]:.4f}' if metrics.get(key) is not None else 'N/D'
+    msg = '\n'.join(['HYDRO-LOGICS — RESUMEN DE VALIDACIÓN',
+                     f'N con etiqueta: {len(labelled)}', f'RMSE: {fmt("RMSE_pH")}',
+                     f'MAE: {fmt("MAE_pH")}', f'Sesgo: {fmt("bias_pH")}',
+                     f'R²: {fmt("R2")}',
+                     f'Cobertura empírica: {fmt("empirical_coverage_pct")}%'])
+    ax.text(.05, .95, msg, ha='left', va='top', family='monospace', fontsize=12)
+    fig.tight_layout(); fig.savefig(out_dir/'fig4_resumen.png', dpi=180); plt.close(fig)
+
+
+def extract_onsets(path: Path, output_path: Path, baseline_points: int,
+                   threshold_sigma: float, consecutive: int,
+                   current_sign: str) -> list[dict]:
+    """Operational threshold, NOT HER-specific chemical identification."""
+    from scipy.signal import savgol_filter
+    with path.open(encoding='utf-8-sig', newline='') as f:
+        reader = csv.DictReader(f)
+        required = {'sweep_id', 'voltage_V', 'current_A', 'role', 'temperature_C'}
+        if not required.issubset(set(reader.fieldnames or [])):
+            raise ValueError(f'CSV LSV requiere columnas {sorted(required)}')
+        rows = list(reader)
+    group: dict[str, list[dict]] = defaultdict(list)
+    for r in rows:
+        group[r['sweep_id']].append(r)
     results = []
-    
-    for pH_target in pH_levels:
-        filter_hl = HydroLogicsFilter(K_cal_estimated, u_K)
-        pH_estimates = []
-        
-        for iteration in range(N_ITERATIONS):
-            Vonset_measured = generate_Vonset(
-                pH_target, K_cal_estimated,
-                noise=True, include_interference=True
-            )
-            pH_est, _ = filter_hl.update(Vonset_measured)
-            pH_estimates.append(pH_est)
-        
-        results.append({
-            'pH_true': pH_target,
-            'pH_estimates': np.array(pH_estimates),
-            'pH_mean': np.mean(pH_estimates),
-            'pH_std': np.std(pH_estimates, ddof=1)
-        })
-        
-        if int(pH_target) == pH_target:
-            print(f"  pH {pH_target:.0f}: "
-                  f"estimated = {np.mean(pH_estimates):.3f} ± "
-                  f"{np.std(pH_estimates, ddof=1):.3f}")
-    
+    for ident, data in group.items():
+        if len(data) < max(11, baseline_points + consecutive):
+            raise ValueError(f'Curva {ident}: insuficientes puntos LSV')
+        v = np.array([float(d['voltage_V']) for d in data])
+        i = np.array([float(d['current_A']) for d in data])
+        if not np.all(np.isfinite(v)) or not np.all(np.isfinite(i)):
+            raise ValueError(f'Curva {ident}: valores no finitos')
+        if not np.all(np.diff(v) < 0):
+            raise ValueError(f'Curva {ident}: voltajes deben descender estrictamente')
+        meta = data[0]
+        for key in ('role', 'sample_id', 'temperature_C', 'pH_reference', 'batch_id'):
+            if len({str(d.get(key, '')) for d in data}) != 1:
+                raise ValueError(f'Curva {ident}: {key} cambia durante el barrido')
+        if len(i) >= 7:
+            ismooth = savgol_filter(i, window_length=5, polyorder=2, mode='interp')
+        else:
+            ismooth = i.copy()
+        baseline = ismooth[:baseline_points]
+        mid = float(np.median(baseline))
+        sigma = float(1.4826 * np.median(abs(baseline - mid)))
+        # Floor based on raw baseline std; actual instrument detection limit is unknown.
+        sigma = max(sigma, float(np.std(baseline, ddof=1)), 1e-12)
+        direction = -1 if current_sign == 'negative' else 1
+        exceed = direction * (ismooth - mid) > threshold_sigma * sigma
+        onset = None
+        for j in range(baseline_points, len(i) - consecutive + 1):
+            if bool(np.all(exceed[j:j + consecutive])):
+                onset = float(v[j]); break
+        if onset is None:
+            # Do NOT silently invent onset or include as usable measurement.
+            print(f'AVISO: {ident}: sin cruce de umbral; curva descartada')
+            continue
+        results.append({'sample_id': meta.get('sample_id') or ident,
+                        'role': meta['role'], 'pH_reference': meta.get('pH_reference', ''),
+                        'Vonset_V': onset, 'temperature_C': meta['temperature_C'],
+                        'batch_id': meta.get('batch_id', ''), 'sweep_id': ident,
+                        'baseline_sigma_A': sigma})
+    if not results:
+        raise ValueError('Ninguna curva cruzó el umbral')
+    write_csv(output_path, results)
     return results
 
 
-# ============================================================================
-# VALIDATION METRICS
-# ============================================================================
-def calculate_metrics(results):
-    """
-    Calculates protocol performance metrics.
-    """
-    pH_true_all = np.array([r['pH_true'] for r in results])
-    pH_est_all = np.concatenate([r['pH_estimates'] for r in results])
-    pH_true_repeated = np.repeat(pH_true_all, N_ITERATIONS)
-    
-    residuals = pH_est_all - pH_true_repeated
-    
-    MSE = np.mean(residuals**2)
-    RMSE = np.sqrt(MSE)
-    MAE = np.mean(np.abs(residuals))
-    bias = np.mean(residuals)
-    
-    SS_res = np.sum(residuals**2)
-    SS_tot = np.sum((pH_true_repeated - np.mean(pH_true_repeated))**2)
-    R2 = 1 - (SS_res / SS_tot)
-    NSE = 1 - (SS_res / SS_tot)
-    
-    U_pH = 2 * np.std(residuals)
-    coverage = np.mean(np.abs(residuals) <= U_pH) * 100
-    kurt = kurtosis(residuals, fisher=True)
-    
-    return {
-        'MSE': MSE,
-        'RMSE': RMSE,
-        'MAE': MAE,
-        'bias': bias,
-        'R2': R2,
-        'NSE': NSE,
-        'U_pH': U_pH,
-        'coverage': coverage,
-        'kurtosis': kurt,
-        'residuals': residuals,
-        'pH_true': pH_true_all
-    }
+def self_test() -> None:
+    c = Config(sigma_ref_V=0, sigma_ohmic_residual_V=0,
+               sigma_measurement_V=0, interference_probability=0)
+    c.check()
+    for ph in (2., 7., 12.):
+        f = PHKalman(-.32, c)
+        v = -.32 - slope(25.) * ph
+        estimated, cov = f.update(v, 25.)
+        assert abs(estimated - ph) < 1e-6, (ph, estimated)
+        assert cov >= 0
+    f = PHKalman(-.32, c)
+    assert f.update(-.32 - slope(25.) * 4, 25)[0] < 7
+    # A smaller onset voltage must imply larger pH for same intercept.
+    assert slope(35) > slope(25)
+    rng = np.random.default_rng(42)
+    records, cal, _ = run_synthetic(Config(), rng, trials=3, replicates=3)
+    assert len(records) == 21 * 3
+    assert abs(cal['K_cal_estimated_V'] - (-0.32)) < .05
+    assert metrics_for(records)['n_labelled'] == 63
+    print('SELF-TEST OK: signo, termodinámica, calibración y Monte Carlo')
 
 
-# ============================================================================
-# SEPARATE FIGURES GENERATION
-# ============================================================================
-def generate_separate_figures(results, metrics, K_cal_estimated, u_K):
-    """
-    Generates four independent, high-resolution figures in English.
-    """
-    pH_true = np.array([r['pH_true'] for r in results])
-    pH_mean = np.array([r['pH_mean'] for r in results])
-    pH_std = np.array([r['pH_std'] for r in results])
-    
-    # Figure 1: Target pH vs Estimated pH
-    plt.figure(figsize=(7, 5), dpi=300)
-    plt.fill_between(pH_true, pH_true - metrics['U_pH'], pH_true + metrics['U_pH'],
-                     color='#d9e2ec', alpha=0.6, label=f'95% CI ($U_{{pH}} = \\pm{metrics["U_pH"]:.3f}$)')
-    plt.plot([2, 12], [2, 12], 'k--', linewidth=1.2, label='Ideal Baseline ($y=x$)')
-    plt.errorbar(pH_true, pH_mean, yerr=pH_std, fmt='o', color='#102a43', ecolor='#829ab1',
-                 elinewidth=1.2, capsize=3, markersize=5,
-                 label=f'HydroLogics ($R^2 = {metrics["R2"]:.4f}$)')
-    plt.xlabel('Target pH ($pH_{{true}}$)')
-    plt.ylabel('Estimated pH ($\\hat{{pH}}$)')
-    plt.title('Monte Carlo Validation: Target vs. Estimated pH')
-    plt.legend(loc='upper left')
-    plt.grid(True, linestyle=':', alpha=0.6)
-    plt.xlim(1.5, 12.5)
-    plt.ylim(1.5, 12.5)
-    plt.tight_layout()
-    plt.savefig('fig1_ph_target_vs_estimated.png')
-    plt.close()
-
-    # Figure 2: Error Distribution
-    plt.figure(figsize=(7, 5), dpi=300)
-    residuals = metrics['residuals']
-    plt.hist(residuals, bins=40, density=True, alpha=0.7, color='#102a43', edgecolor='black')
-    plt.axvline(0, color='red', linestyle='--', linewidth=2, label='Zero Error')
-    plt.axvline(metrics['bias'], color='orange', linestyle='-', linewidth=2, label=f'Bias = {metrics["bias"]:.3f} pH')
-    plt.xlabel('Estimation Error (pH units)')
-    plt.ylabel('Probability Density')
-    plt.title(f'Estimation Error Distribution (Kurtosis = {metrics["kurtosis"]:.4f})')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig('fig2_error_distribution.png')
-    plt.close()
-
-    # Figure 3: Uncertainty per pH Level
-    plt.figure(figsize=(7, 5), dpi=300)
-    plt.bar(pH_true, pH_std, width=0.4, color='#e07a5f', alpha=0.7)
-    plt.axhline(metrics['U_pH']/2, color='red', linestyle='--', label=f'$U_{{pH}}/2 = {metrics["U_pH"]/2:.3f}$')
-    plt.xlabel('Target pH ($pH_{{true}}$)')
-    plt.ylabel('Standard Deviation (pH units)')
-    plt.title('Uncertainty Distribution Across pH Scale')
-    plt.legend()
-    plt.grid(True, alpha=0.3, axis='y')
-    plt.tight_layout()
-    plt.savefig('fig3_uncertainty_per_ph_level.png')
-    plt.close()
-
-    # Figure 4: Performance Summary Panel
-    plt.figure(figsize=(6, 5), dpi=300)
-    plt.axis('off')
-    metrics_text = f"""
-HYDROLOGICS PERFORMANCE METRICS
-(Original Protocol Monte Carlo Simulation)
-
-Goodness of Fit (R^2):        {metrics['R2']:.4f}
-Root Mean Square Error:      {metrics['RMSE']:.3f} pH
-Mean Absolute Error:         {metrics['MAE']:.3f} pH
-Systematic Bias:             {metrics['bias']:.3f} pH
-Expanded Uncertainty (k=2):  +-{metrics['U_pH']:.3f} pH
-95% Coverage Rate:           {metrics['coverage']:.2f}%
-Excess Kurtosis:             {metrics['kurtosis']:.4f}
-
-CALIBRATION SUMMARY
-Estimated K_cal:             {K_cal_estimated:.4f} V
-Standard Uncertainty u_K:    +-{u_K:.4f} V
-True Physical K_cal:         PARAMS['K_cal_true']:.4f V
-Offset Magnitude:            {abs(K_cal_estimated - PARAMS['K_cal_true'])*1000:.2f} mV
-"""
-    plt.text(0.05, 0.95, metrics_text, ha='left', va='top', fontsize=10, family='monospace',
-            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-    plt.tight_layout()
-    plt.savefig('fig4_performance_summary.png')
-    plt.close()
-
-    print("\nFour separate figures saved successfully:")
-    print("  • fig1_ph_target_vs_estimated.png")
-    print("  • fig2_error_distribution.png")
-    print("  • fig3_uncertainty_per_ph_level.png")
-    print("  • fig4_performance_summary.png")
+def cli() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description='Hydro-Logics revisado: simulación, CSV real o extracción LSV.')
+    p.add_argument('--mode', choices=['synthetic', 'real', 'extract'], default='synthetic')
+    p.add_argument('--input', type=Path, help='CSV para modo real/extract')
+    p.add_argument('--output-dir', type=Path, default=Path('hydrologics_output'))
+    p.add_argument('--seed', type=int, default=42)
+    p.add_argument('--trials', type=int, default=50, help='Trayectorias independientes POR pH')
+    p.add_argument('--replicates', type=int, default=5, help='Lecturas por trayectoria')
+    p.add_argument('--temperature-C', type=float, default=25.)
+    p.add_argument('--interference-probability', type=float, default=.05)
+    p.add_argument('--sigma-ref-mV', type=float, default=15., help='Ruido pseudo-referencia por lectura, mV')
+    p.add_argument('--sigma-ohmic-mV', type=float, default=15., help='Residual óhmico por lectura, mV')
+    p.add_argument('--sigma-measurement-mV', type=float, default=2., help='Ruido de medida de potencial, mV')
+    p.add_argument('--process-variance-ph2', type=float, default=0., help='Q de Kalman en pH² por actualización')
+    p.add_argument('--no-plots', action='store_true')
+    p.add_argument('--self-test', action='store_true')
+    p.add_argument('--baseline-points', type=int, default=15)
+    p.add_argument('--threshold-sigma', type=float, default=3.)
+    p.add_argument('--consecutive', type=int, default=3)
+    p.add_argument('--current-sign', choices=['negative', 'positive'], default='negative')
+    return p.parse_args()
 
 
-# ============================================================================
-# MAIN ENTRY POINT
-# ============================================================================
-def main():
-    print("="*70)
-    print("HYDROLOGICS PROTOCOL: Sensorless pH Monitoring")
-    print("Monte Carlo Validation with Redox Interferences (Zero-Mean Ohmic Fluctuations)")
-    print("="*70)
-    
-    print(f"\nPhysical Parameters:")
-    print(f"  Temperature: {T_KELVIN} K (25°C)")
-    print(f"  Nernstian Slope: {S_NERNST*1000:.3f} mV/pH")
-    print(f"  Ru: {PARAMS['Ru']} Ω")
-    print(f"  sigma_noise: {PARAMS['sigma_noise']*1000:.2f} mA")
-    print(f"  sigma_drift: {PARAMS['delta_E_ref_std']*1000:.1f} mV")
-    print(f"  True K_cal: {PARAMS['K_cal_true']:.4f} V")
-    print(f"  Interference Prob: {PARAMS['interference_prob']*100:.0f}%")
-    
-    # PHASE 1: Calibration
-    print("\n[PHASE 1] System Calibration...")
-    buffer_pH = [2.0, 4.0, 7.0, 10.0, 12.0]
-    K_cal_estimated, u_K = calibrate_system(buffer_pH, n_replicates=3)
-    print(f"  True K_cal:       {PARAMS['K_cal_true']:.4f} V")
-    print(f"  Estimated K_cal:  {K_cal_estimated:.4f} +- {u_K:.4f} V")
-    print(f"  Offset:           {abs(K_cal_estimated - PARAMS['K_cal_true'])*1000:.2f} mV")
-    
-    # PHASE 2: Monte Carlo Simulation
-    print("\n[PHASE 2] Monte Carlo Simulation...")
-    results = run_monte_carlo(K_cal_estimated, u_K)
-    
-    # PHASE 3: Metrics Calculation
-    print("\n[PHASE 3] Metrics Calculation...")
-    metrics = calculate_metrics(results)
-    
-    # PHASE 4: Final Results Summary
-    print("\n" + "="*70)
-    print("FINAL RESULTS")
-    print("="*70)
-    print(f"  R^2 = {metrics['R2']:.4f}")
-    print(f"  RMSE = {metrics['RMSE']:.3f} pH")
-    print(f"  MAE = {metrics['MAE']:.3f} pH")
-    print(f"  Bias = {metrics['bias']:.3f} pH")
-    print(f"  U_pH (k=2) = +-{metrics['U_pH']:.3f} pH")
-    print(f"  Coverage 95% = {metrics['coverage']:.2f}%")
-    print(f"  Kurtosis = {metrics['kurtosis']:.4f}")
-    print("="*70)
-    
-    # PHASE 5: Separate Figures Generation
-    generate_separate_figures(results, metrics, K_cal_estimated, u_K)
-    
-    # PHASE 6: Save Results JSON
-    output = {
-        'framework': 'HydroLogics',
-        'version': 'zero_mean_ohmic',
-        'parameters': {
-            'Ru_Ohm': PARAMS['Ru'],
-            'sigma_noise_A': PARAMS['sigma_noise'],
-            'delta_E_ref_std_V': PARAMS['delta_E_ref_std'],
-            'K_cal_true_V': PARAMS['K_cal_true'],
-            'S_NERNST_V_per_pH': S_NERNST,
-            'interference_prob': PARAMS['interference_prob'],
-            'interference_magnitude_V': PARAMS['interference_magnitude']
-        },
-        'calibration': {
-            'K_cal_estimated_V': K_cal_estimated,
-            'u_K_V': u_K
-        },
-        'metrics': {k: v for k, v in metrics.items() 
-                   if k not in ['residuals', 'pH_true']},
-        'results_per_pH': [
-            {
-                'pH_true': r['pH_true'],
-                'pH_mean': r['pH_mean'],
-                'pH_std': r['pH_std']
-            }
-            for r in results
-        ]
-    }
-    
-    with open('hydrologics_results.json', 'w') as f:
-        json.dump(output, f, indent=2)
-    
-    print("\nResults saved to: hydrologics_results.json")
+def main() -> None:
+    args = cli()
+    if args.self_test:
+        self_test(); return
+    cfg = Config(temperature_C=args.temperature_C,
+                 interference_probability=args.interference_probability,
+                 sigma_ref_V=args.sigma_ref_mV / 1000.,
+                 sigma_ohmic_residual_V=args.sigma_ohmic_mV / 1000.,
+                 sigma_measurement_V=args.sigma_measurement_mV / 1000.,
+                 q_ph2=args.process_variance_ph2)
+    cfg.check()
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    if args.mode == 'extract':
+        if args.input is None:
+            raise SystemExit('--input obligatorio en extract')
+        if args.baseline_points < 3 or args.threshold_sigma <= 0 or args.consecutive < 1:
+            raise SystemExit('Parámetros de detección no válidos')
+        f = args.output_dir/'onsets_extraidos.csv'
+        rows = extract_onsets(args.input, f, args.baseline_points,
+                              args.threshold_sigma, args.consecutive,
+                              args.current_sign)
+        print(f'{len(rows)} curvas procesadas; onsets: {f}')
+        print('IMPORTANTE: el umbral no garantiza que la corriente sea HER.')
+        return
+    if args.mode == 'synthetic':
+        records, calibration, details = run_synthetic(
+            cfg, np.random.default_rng(args.seed), args.trials, args.replicates)
+    else:
+        if args.input is None:
+            raise SystemExit('--input obligatorio en real')
+        records, calibration, details = run_real(cfg, load_onset_csv(args.input))
+    metrics = metrics_for(records)
+    write_csv(args.output_dir/'predicciones.csv', records)
+    report = {'software': 'HydroLogics corrected v1.0',
+              'validation_type': 'SYNTHETIC (NOT experimental)' if args.mode == 'synthetic'
+              else 'EXPERIMENTAL CSV (labels only where supplied)',
+              'config': asdict(cfg), 'calibration': calibration,
+              'design': details, 'metrics': metrics,
+              'caveats': [
+                  'Vonset es empírico y no es el potencial reversible',
+                  'Pendiente Nernst fija: requiere contrastar cinética y matriz',
+                  'Ru e intensidad NO se simulan físicamente; el ruido iR es un residuo',
+                  'Una referencia con deriva temporal correlacionada requiere otro modelo',
+                  'Cobertura ±2u no equivale a garantía 95% con colas pesadas',
+                  'Un ajuste/calibración no se debe evaluar con las mismas muestras']}
+    with (args.output_dir/'resultados.json').open('w', encoding='utf-8') as f:
+        json.dump(report, f, indent=2, ensure_ascii=False, allow_nan=False)
+    if not args.no_plots:
+        plot_results(records, metrics, args.output_dir)
+    print(f'Modo: {args.mode} | sesiones: {len(records)} | pendiente 25°C: {slope(25)*1000:.3f} mV/pH')
+    print(f'K_cal: {calibration["K_cal_estimated_V"]:.5f} V; uK (estándar): {calibration["u_K_standard_V"]:.5f} V')
+    for name in ('RMSE_pH', 'MAE_pH', 'bias_pH', 'R2', 'empirical_coverage_pct'):
+        if name in metrics:
+            print(f'{name}: {metrics[name]}')
+    print(f'Archivos en: {args.output_dir.resolve()}')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
