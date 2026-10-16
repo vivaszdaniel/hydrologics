@@ -8,7 +8,7 @@
 
 ## 1. Contenido y alcance
 
-El archivo `simulation_corregida.py` es **ejecutable** y tiene tres modos:
+El archivo `simulation.py` es **ejecutable** y tiene tres modos:
 
 | Modo | Objetivo | Entrada | Salida |
 |---|---|---|---|
