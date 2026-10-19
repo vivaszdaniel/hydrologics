@@ -1,0 +1,61 @@
+{
+  "software": "HydroLogics corrected v1.0",
+  "validation_type": "SYNTHETIC (NOT experimental)",
+  "config": {
+    "k_true_V": -0.32,
+    "temperature_C": 25.0,
+    "sigma_ref_V": 0.015,
+    "sigma_ohmic_residual_V": 0.015,
+    "sigma_measurement_V": 0.002,
+    "interference_probability": 0.05,
+    "interference_min_V": 0.02,
+    "interference_max_V": 0.03,
+    "q_ph2": 0.0,
+    "prior_pH": 7.0,
+    "prior_variance_ph2": 1000000.0
+  },
+  "calibration": {
+    "n_buffers": 5,
+    "n_readings": 15,
+    "buffers_pH": [
+      2.0,
+      4.0,
+      7.0,
+      10.0,
+      12.0
+    ],
+    "method": "fixed-Nernst-slope; equal-buffer weight",
+    "K_cal_estimated_V": -0.3181875412111194,
+    "u_K_standard_V": 0.003601906093203243,
+    "K_cal_true_V": -0.32,
+    "K_offset_V": 0.0018124587888805888
+  },
+  "design": {
+    "mode": "synthetic",
+    "n_levels": 21,
+    "n_trials_per_level": 50,
+    "readings_per_trial": 5,
+    "n_simulated_test_readings": 5250
+  },
+  "metrics": {
+    "n_total": 1050,
+    "n_labelled": 1050,
+    "RMSE_pH": 0.1649528970546978,
+    "MAE_pH": 0.13246819360079837,
+    "bias_pH": 0.02174818555679459,
+    "median_U95_approx_pH": 0.3547432854716628,
+    "empirical_coverage_pct": 96.76190476190476,
+    "excess_kurtosis": -0.159829877340826,
+    "uncertainty_note": "Approx ±2u, NOT guaranteed 95% CI under heavy tails",
+    "R2": 0.9970316954639923,
+    "NSE": 0.9970316954639923
+  },
+  "caveats": [
+    "Vonset is empirical and not the reversible potential",
+    "Fixed Nernst slope: requires kinetics and matrix verification",
+    "Ru and intensity are not physically simulated; iR noise is a residual",
+    "Correlated temporal reference drift requires a different model",
+    "±2u coverage does not guarantee 95% under heavy tails",
+    "Fitting/calibration must not be evaluated using the same samples"
+  ]
+}
