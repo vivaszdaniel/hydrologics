@@ -2,7 +2,7 @@
 
 **Publication Title:** *Theoretical Framework for Sensorless pH Monitoring in Hydrometallurgical Systems: A Voltammetric Overpotential Approach for Edge Computing*  
 **DOI / Reference:** [https://doi.org/10.5281/zenodo.18906011](https://doi.org/10.5281/zenodo.18906011)  
-**Authors:** Daniel Vivas¹*, José Sanchez², Yndira Brito¹, José Duque³, and Arnaldo Armado⁴  
+**Authors:** Daniel Vivas¹*, Jose Sanchez², Yndira Brito¹, José Duque³, and Arnaldo Armado⁴  
 
 ¹ *Aragua Project Unit (UPA), Faculty of Health Sciences, University of Carabobo, Maracay, Venezuela*  
 ² *Juana Ramírez Territorial Polytechnic University of the Plains, Valle de la Pascua, Guárico, Venezuela*  
@@ -23,7 +23,7 @@
 
 2. **Feature Extraction Engine (`extract` mode):** Detects operational onset potentials ($V_{\mathrm{onset}}$) from raw LSV polarization curves using Savitzky–Golay digital filtering and robust adaptive thresholding.
 
-3. **Real-Data Calibration & Inference (`real` mode):** Implements a matrix-matched calibration module coupled with a Joseph-formulated sequential state estimator for sample pH prediction and uncertainty propagation ($U_{95\%}$).
+3. **Real-Data Calibration & Inference (`real` mode):** Implements a matrix-matched calibration module coupled with a Joseph-formulated sequential state estimator for sample pH prediction and uncertainty propagation.
 
 > **Methodological Note:** Hydro-Logics provides an analytical and sequential filtering pipeline for empirical electrochemical data. It does not solve full continuum Nernst-Planck/Poisson-Boltzmann PDE systems, nor does it replace physical experimental validation with synthetic generation.
 
@@ -110,7 +110,6 @@ $$
 R_v = \sigma_{\mathrm{ref}}^2 + \sigma_{\mathrm{iR}}^2 + \sigma_{\mathrm{meas}}^2 + p_{\mathrm{interf}} \left( \frac{a^2 + ab + b^2}{3} \right)
 $$
 
-Uncertainty bounds ($U_{95\%}$) \approx 2 u_{\mathrm{total}}$) account for both state estimation variance $P^+$ and calibration intercept uncertainty $u_{K_{\mathrm{cal}}}$:
 $$
 u_{\mathrm{total}} = \sqrt{P^+ + \left( \frac{u_{K_{\mathrm{cal}}}}{\bar{S}} \right)^2}
 $$
@@ -149,6 +148,8 @@ python simulation.py --self-test
 ```
 
 #### 2. Synthetic Monte Carlo Validation
+
+python simulation.py --mode synthetic --output-dir synthetic_results
 
 Run a 1,050-trial Monte Carlo benchmark ($50\text{ trials} \times 21\text{ pH levels}$):
 
