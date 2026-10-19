@@ -110,8 +110,7 @@ $$
 R_v = \sigma_{\mathrm{ref}}^2 + \sigma_{\mathrm{iR}}^2 + \sigma_{\mathrm{meas}}^2 + p_{\mathrm{interf}} \left( \frac{a^2 + ab + b^2}{3} \right)
 $$
 
-Uncertainty bounds ($U_{95\%} \approx 2 u_{\mathrm{total}}$) account for both state estimation variance $P^+$ and calibration intercept uncertainty $u_{K_{\mathrm{cal}}}$:
-
+Uncertainty bounds ($U_{95\%}$) \approx 2 u_{\mathrm{total}}$) account for both state estimation variance $P^+$ and calibration intercept uncertainty $u_{K_{\mathrm{cal}}}$:
 $$
 u_{\mathrm{total}} = \sqrt{P^+ + \left( \frac{u_{K_{\mathrm{cal}}}}{\bar{S}} \right)^2}
 $$
